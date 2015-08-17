@@ -1,0 +1,4 @@
+bsort
+*.log
+*.o
+.deps

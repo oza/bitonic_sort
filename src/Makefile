@@ -72,7 +72,7 @@ CC = gcc
 CCDEPMODE = depmode=gcc3
 
 # specify flags
-CFLAGS = -Wall -O3 -funroll-loops -msse2 -mtune=nocona
+CFLAGS = -Wall -O3 -funroll-loops -msse2 -msse4.1 -mtune=nocona
 CPP = gcc -E
 CPPFLAGS = 
 CYGPATH_W = echo

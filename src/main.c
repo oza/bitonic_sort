@@ -20,13 +20,14 @@
 #define LAMBDA                  8.0
 #define SHUFFLE_RATE            0.8
 #define TEST_DATA_SIZE          20
-#define DEFAULT_CHUNK_NUM       8
+//#define DEFAULT_CHUNK_NUM       8
+#define DEFAULT_CHUNK_NUM       1
 
 #define _simd_align(x)   ((((intptr_t)x) + ((0x01 << 4) - 1)) & ~((0x01 << 4) - 1))
 
 static int32_t _init_rand;
 
-inline static float _gen_keyseq(float max) __attribute__((always_inline));
+inline static int _gen_keyseq(int max) __attribute__((always_inline));
 inline static void _replace_uint32(void *a, void *b) __attribute__((always_inline));
 static double  _gettimeofday_sec(void);
 
@@ -41,10 +42,10 @@ main(int argc, char **argv)
         uint32_t        cnt;
         uint32_t        r1;
         uint32_t        r2;
-        float           *d;
-        float           *d_aligned;
-        float           *buf;
-        float           *buf_aligned;
+        int           *d;
+        int           *d_aligned;
+        int           *buf;
+        int           *buf_aligned;
         double          srat;
         double          t;
 
@@ -57,10 +58,12 @@ main(int argc, char **argv)
                 switch (res) {
                 case 'f':
                         _enable_fast_memcpy = 1;
+			printf("enable fast memcpy.\n");
                         break;
                 
                 case 'b':
                         _enable_bitonic_sort = 1;
+			printf("enable bitonic sort.\n");
                         break;
                 
                 default:
@@ -76,7 +79,7 @@ main(int argc, char **argv)
                 srat = atof(argv[optind + 1]);
 
         if (mul < 16 || mul > 30 || srat < 0.1 || srat > 1.0) {
-                fprintf(stdout, "Error: out of required range for these parameters (16<=x<=30/0.1<=ratio<=1.0)");
+                fprintf(stdout, "Error: out of required range for these parameters (16<=x<=30 / 0.1<=ratio<=1.0)");
                 return EXIT_FAILURE;
         }
 
@@ -86,17 +89,18 @@ main(int argc, char **argv)
         fprintf(stdout, "Count:%u Shuffle:%u\n", cnt, scnt);
 
         /* Generate test data */
-        d = malloc(sizeof(float) * cnt + 127);
-        buf = malloc(sizeof(float) * cnt + 127);
+        d = malloc(sizeof(int) * cnt + 127);
+        buf = malloc(sizeof(int) * cnt + 127);
 
         if (d == NULL || buf == NULL)
                 eoutput("Can't allocate memories");
 
-        d_aligned = (float *)_simd_align(d);
-        buf_aligned = (float *)_simd_align(buf);
+        d_aligned = (int *)_simd_align(d);
+        buf_aligned = (int *)_simd_align(buf);
 
+	printf("%d\n", RAND_MAX);
         for (i = 0, d[0] = 0.0; i < cnt - 1; i++)
-                d[i + 1] = d[i] + _gen_keyseq(LAMBDA);
+                d[i] = rand();
 
         /* Shuffling */
         for (i = 0; i < scnt; i++) {
@@ -127,23 +131,24 @@ main(int argc, char **argv)
 
 /* --- Intra Functions Below ---*/
 
-float
-_gen_keyseq(float max) 
+int
+_gen_keyseq(int max) 
 {
         if  (!_init_rand++)
                 srand(0);
 
-        return (float)(max * (-log(1.0 - (float)rand() / UINT32_MAX))) + 1.0;
+        //return (int)(max * (-log(1.0 - (int)rand() / UINT32_MAX))) + 1.0;
+        return rand() % 100;
 }
 
 void 
 _replace_uint32(void *a, void *b)
 {
-        uint32_t        *va;
-        uint32_t        *vb;
+        int        *va;
+        int        *vb;
 
-        va = (uint32_t *)a;
-        vb = (uint32_t *)b;
+        va = (int *)a;
+        vb = (int *)b;
 
         *va ^= *vb;
         *vb ^= *va;

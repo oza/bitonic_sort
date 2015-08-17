@@ -14,7 +14,7 @@
 extern uint32_t _enable_fast_memcpy;
 extern uint32_t _enable_bitonic_sort;
 
-extern void bitonic_sort(float *d, uint32_t s, float *buf, uint32_t chunk_num);
-extern int32_t err_check(const float *d, uint32_t s);
+extern void bitonic_sort(int *d, uint32_t s, int *buf, uint32_t chunk_num);
+extern int32_t err_check(const int *d, int s);
 
 #endif /* BITONIC_SORT_H */

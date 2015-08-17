@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <emmintrin.h>
+#include <smmintrin.h>
 #include <pthread.h>
 
 #include "err_utils.h"
@@ -27,11 +28,11 @@
                 d;                      \
         })
 
-#define _replace_float_adr(a, b)        \
+#define _replace_int_adr(a, b)        \
         ({                              \
-                a = (float *)(((intptr_t)a) ^ ((intptr_t)b));   \
-                b = (float *)(((intptr_t)b) ^ ((intptr_t)a));   \
-                a = (float *)(((intptr_t)a) ^ ((intptr_t)b));   \
+                a = (int *)(((intptr_t)a) ^ ((intptr_t)b));   \
+                b = (int *)(((intptr_t)b) ^ ((intptr_t)a));   \
+                a = (int *)(((intptr_t)a) ^ ((intptr_t)b));   \
         })
 
 #define _zalloc(size)                           \
@@ -46,9 +47,11 @@
 #define _ptr_offset(x, y)       (((intptr_t)(x)) - ((intptr_t)(y)))
 #define _likely(x)              __builtin_expect(!!(x), 1)
 
+//#define DEBUG
+
 struct _chunk_info {
-        float           *d;
-        float           *buf;
+        int           *d;
+        int           *buf;
         uint32_t        chk;
         uint32_t        offset;
 };
@@ -61,25 +64,25 @@ inline static void _fast_memcpy(void *d, void *s, size_t sz) __attribute__((alwa
 
 /* Support functions for bitonic sort */
 static void *_bitonic_sort(void *arg);
-static void _bitonic_merge(float *d, uint32_t s, float *buf, uint32_t chunk_size);
+static void _bitonic_merge(int *d, uint32_t s, int *buf, uint32_t chunk_size);
 
-inline static void _bitonic_sort32(float *d) __attribute__((always_inline));
-inline static void _bitonic_merge_kernel16n(float *dest, float *a, float *b, uint32_t s) __attribute__((always_inline));
-inline static void _bitonic_sort_kernel4(float *a, float *b) __attribute__((always_inline));
-inline static void _bitonic_merge_kernel4(float *a, float *b) __attribute__((always_inline));
-inline static void _bitonic_merge_kernel4core(float *a, float *b) __attribute__((always_inline));
-inline static void _bitonic_merge_kernel8(float *a, float *b) __attribute__((always_inline));
-inline static void _bitonic_merge_kernel8core(float *a, float *b) __attribute__((always_inline));
+inline static void _bitonic_sort32(int *d) __attribute__((always_inline));
+inline static void _bitonic_merge_kernel16n(int *dest, int *a, int *b, uint32_t s) __attribute__((always_inline));
+inline static void _bitonic_sort_kernel4(int *a, int *b) __attribute__((always_inline));
+inline static void _bitonic_merge_kernel4(int *a, int *b) __attribute__((always_inline));
+inline static void _bitonic_merge_kernel4core(int *a, int *b) __attribute__((always_inline));
+inline static void _bitonic_merge_kernel8(int *a, int *b) __attribute__((always_inline));
+inline static void _bitonic_merge_kernel8core(int *a, int *b) __attribute__((always_inline));
 
 /* Global variables for the shift of processing */
 uint32_t        _enable_fast_memcpy = 0;
-uint32_t        _enable_bitonic_sort = 1;
+uint32_t        _enable_bitonic_sort = 0;
 
 /* Support other functions */
-static int32_t _compare_float(const void *a, const void *b);
+static int32_t _compare_int(const void *a, const void *b);
 
 void
-bitonic_sort(float *d, uint32_t s, float *buf, uint32_t chunk_num /* Must be the number of hardware threads */)
+bitonic_sort(int *d, uint32_t s, int *buf, uint32_t chunk_num /* Must be the number of hardware threads */)
 {
         int32_t         i;
         uint32_t        chk;
@@ -87,7 +90,7 @@ bitonic_sort(float *d, uint32_t s, float *buf, uint32_t chunk_num /* Must be the
         struct _chunk_info      *chunk_info;
 
         if (!_enable_bitonic_sort) {
-                qsort((void *)d, s, sizeof(float), _compare_float);
+                qsort((void *)d, s, sizeof(int), _compare_int);
         } else {
                 doutput(FILE_OUTPUT, "starting ...");
 
@@ -140,15 +143,17 @@ bitonic_sort(float *d, uint32_t s, float *buf, uint32_t chunk_num /* Must be the
 }
 
 int32_t 
-err_check(float *d, uint32_t s)
+err_check(int *d, uint32_t s)
 {
         int32_t i;
 
         doutput(FILE_OUTPUT, "starting ...");
 
         for (i = 0; i < s - 1; i++) {
-                if (d[i] > d[i + 1])
+                if (d[i] > d[i + 1]) {
+			printf("error: d[%d] = %d < d[%d] = %d\n", i, d[i], i + 1, d[i + 1]);
                         return -1;
+		}
         }
 
         return 0;
@@ -211,38 +216,47 @@ _cpuid_supported(void)
         return v;
 }
 
+#define __mm_shuffle_epi32_with_emulation(a, b, mask)	\
+       ({						\
+		__m128 af, bf, cf;			\
+		af = _mm_castsi128_ps(a);		\
+		bf = _mm_castsi128_ps(b);		\
+		cf = _mm_shuffle_ps(af, bf, mask);	\
+		_mm_castps_si128(cf);			\
+       });
+
 #define __inregister_sort(b, reg)       \
         do {                            \
-                reg[0] = _mm_load_ps(b);                \
-                reg[1] = _mm_load_ps(b+4);              \
-                reg[2] = _mm_load_ps(b+8);              \
-                reg[3] = _mm_load_ps(b+12);             \
+                reg[0] = _mm_load_si128((__m128i*)b);                \
+                reg[1] = _mm_load_si128((__m128i*)(b+4));              \
+                reg[2] = _mm_load_si128((__m128i*)(b+8));              \
+                reg[3] = _mm_load_si128((__m128i*)(b+12));             \
 \
-                reg[4] = _mm_min_ps(reg[0], reg[1]);    \
-                reg[5] = _mm_max_ps(reg[0], reg[1]);    \
+                reg[4] = _mm_min_epi32(reg[0], reg[1]);    \
+                reg[5] = _mm_max_epi32(reg[0], reg[1]);    \
 \
-                reg[6] = _mm_min_ps(reg[2], reg[3]);    \
-                reg[7] = _mm_max_ps(reg[2], reg[3]);    \
+                reg[6] = _mm_min_epi32(reg[2], reg[3]);    \
+                reg[7] = _mm_max_epi32(reg[2], reg[3]);    \
 \
-                reg[0] = _mm_min_ps(reg[4], reg[6]);    \
-                reg[1] = _mm_max_ps(reg[4], reg[6]);    \
+                reg[0] = _mm_min_epi32(reg[4], reg[6]);    \
+                reg[1] = _mm_max_epi32(reg[4], reg[6]);    \
 \
-                reg[2] = _mm_min_ps(reg[5], reg[7]);    \
-                reg[3] = _mm_max_ps(reg[5], reg[7]);    \
+                reg[2] = _mm_min_epi32(reg[5], reg[7]);    \
+                reg[3] = _mm_max_epi32(reg[5], reg[7]);    \
 \
-                reg[5] = _mm_min_ps(reg[1], reg[2]);    \
-                reg[6] = _mm_max_ps(reg[1], reg[2]);    \
+                reg[5] = _mm_min_epi32(reg[1], reg[2]);    \
+                reg[6] = _mm_max_epi32(reg[1], reg[2]);    \
 \
-                reg[2] = _mm_shuffle_ps(reg[0], reg[5], 0x44);  \
-                reg[7] = _mm_shuffle_ps(reg[0], reg[5], 0xee);  \
+                reg[2] = __mm_shuffle_epi32_with_emulation(reg[0], reg[5], _MM_SHUFFLE(1, 0, 1, 0));  \
+                reg[7] = __mm_shuffle_epi32_with_emulation(reg[0], reg[5], _MM_SHUFFLE(3, 2, 3, 2));  \
 \
-                reg[4] = _mm_shuffle_ps(reg[6], reg[3], 0xee);  \
-                reg[1] = _mm_shuffle_ps(reg[6], reg[3], 0x44);  \
+                reg[4] = __mm_shuffle_epi32_with_emulation(reg[6], reg[3], _MM_SHUFFLE(3, 2, 3, 2));  \
+                reg[1] = __mm_shuffle_epi32_with_emulation(reg[6], reg[3], _MM_SHUFFLE(1, 0, 1, 0));  \
 \
-                reg[0] = _mm_shuffle_ps(reg[2], reg[1], 0xdd);  \
-                reg[5] = _mm_shuffle_ps(reg[2], reg[1], 0x88);  \
-                reg[6] = _mm_shuffle_ps(reg[7], reg[4], 0xdd);  \
-                reg[3] = _mm_shuffle_ps(reg[7], reg[4], 0x88);  \
+                reg[0] = __mm_shuffle_epi32_with_emulation(reg[2], reg[1], _MM_SHUFFLE(3, 1, 3, 1));  \
+                reg[5] = __mm_shuffle_epi32_with_emulation(reg[2], reg[1], _MM_SHUFFLE(2, 0, 2, 0));  \
+                reg[6] = __mm_shuffle_epi32_with_emulation(reg[7], reg[4], _MM_SHUFFLE(3, 1, 3, 1));  \
+                reg[3] = __mm_shuffle_epi32_with_emulation(reg[7], reg[4], _MM_SHUFFLE(2, 0, 2, 0));  \
 \
                 reg[1] = reg[5];        \
                 reg[2] = reg[6];        \
@@ -251,83 +265,83 @@ _cpuid_supported(void)
 #define __bitonic_merge_network4_sim4(a1, b1, a2, b2, a3, b3, a4, b4)   \
         do {                                    \
                 /* L1 processing */             \
-                lo[0] = _mm_min_ps(a1, b1);     \
-                hi[0] = _mm_max_ps(a1, b1);     \
-                lo[1] = _mm_min_ps(a2, b2);     \
-                hi[1] = _mm_max_ps(a2, b2);     \
-                lo[2] = _mm_min_ps(a3, b3);     \
-                hi[2] = _mm_max_ps(a3, b3);     \
-                lo[3] = _mm_min_ps(a4, b4);     \
-                hi[3] = _mm_max_ps(a4, b4);     \
+                lo[0] = _mm_min_epi32(a1, b1);     \
+                hi[0] = _mm_max_epi32(a1, b1);     \
+                lo[1] = _mm_min_epi32(a2, b2);     \
+                hi[1] = _mm_max_epi32(a2, b2);     \
+                lo[2] = _mm_min_epi32(a3, b3);     \
+                hi[2] = _mm_max_epi32(a3, b3);     \
+                lo[3] = _mm_min_epi32(a4, b4);     \
+                hi[3] = _mm_max_epi32(a4, b4);     \
 \
-                a1 = _mm_shuffle_ps(lo[0], hi[0], 0xe4);        \
-                b1 = _mm_shuffle_ps(lo[0], hi[0], 0x4e);        \
-                a2 = _mm_shuffle_ps(lo[1], hi[1], 0xe4);        \
-                b2 = _mm_shuffle_ps(lo[1], hi[1], 0x4e);        \
-                a3 = _mm_shuffle_ps(lo[2], hi[2], 0xe4);        \
-                b3 = _mm_shuffle_ps(lo[2], hi[2], 0x4e);        \
-                a4 = _mm_shuffle_ps(lo[3], hi[3], 0xe4);        \
-                b4 = _mm_shuffle_ps(lo[3], hi[3], 0x4e);        \
+                a1 = __mm_shuffle_epi32_with_emulation(lo[0], hi[0], _MM_SHUFFLE(3, 2, 1, 0));        \
+                b1 = __mm_shuffle_epi32_with_emulation(lo[0], hi[0], _MM_SHUFFLE(1, 0, 3, 2));        \
+                a2 = __mm_shuffle_epi32_with_emulation(lo[1], hi[1], _MM_SHUFFLE(3, 2, 1, 0));        \
+                b2 = __mm_shuffle_epi32_with_emulation(lo[1], hi[1], _MM_SHUFFLE(1, 0, 3, 2));        \
+                a3 = __mm_shuffle_epi32_with_emulation(lo[2], hi[2], _MM_SHUFFLE(3, 2, 1, 0));        \
+                b3 = __mm_shuffle_epi32_with_emulation(lo[2], hi[2], _MM_SHUFFLE(1, 0, 3, 2));        \
+                a4 = __mm_shuffle_epi32_with_emulation(lo[3], hi[3], _MM_SHUFFLE(3, 2, 1, 0));        \
+                b4 = __mm_shuffle_epi32_with_emulation(lo[3], hi[3], _MM_SHUFFLE(1, 0, 3, 2));        \
 \
                 /* L2 processing */             \
-                lo[0] = _mm_min_ps(a1, b1);     \
-                hi[0] = _mm_max_ps(a1, b1);     \
-                lo[1] = _mm_min_ps(a2, b2);     \
-                hi[1] = _mm_max_ps(a2, b2);     \
-                lo[2] = _mm_min_ps(a3, b3);     \
-                hi[2] = _mm_max_ps(a3, b3);     \
-                lo[3] = _mm_min_ps(a4, b4);     \
-                hi[3] = _mm_max_ps(a4, b4);     \
+                lo[0] = _mm_min_epi32(a1, b1);     \
+                hi[0] = _mm_max_epi32(a1, b1);     \
+                lo[1] = _mm_min_epi32(a2, b2);     \
+                hi[1] = _mm_max_epi32(a2, b2);     \
+                lo[2] = _mm_min_epi32(a3, b3);     \
+                hi[2] = _mm_max_epi32(a3, b3);     \
+                lo[3] = _mm_min_epi32(a4, b4);     \
+                hi[3] = _mm_max_epi32(a4, b4);     \
 \
-                a1 = _mm_shuffle_ps(lo[0], hi[0], 0xd8);        \
-                b1 = _mm_shuffle_ps(lo[0], hi[0], 0x8d);        \
-                a2 = _mm_shuffle_ps(lo[1], hi[1], 0xd8);        \
-                b2 = _mm_shuffle_ps(lo[1], hi[1], 0x8d);        \
-                a3 = _mm_shuffle_ps(lo[2], hi[2], 0xd8);        \
-                b3 = _mm_shuffle_ps(lo[2], hi[2], 0x8d);        \
-                a4 = _mm_shuffle_ps(lo[3], hi[3], 0xd8);        \
-                b4 = _mm_shuffle_ps(lo[3], hi[3], 0x8d);        \
+                a1 = __mm_shuffle_epi32_with_emulation(lo[0], hi[0], _MM_SHUFFLE(3, 1, 2, 0));        \
+                b1 = __mm_shuffle_epi32_with_emulation(lo[0], hi[0], _MM_SHUFFLE(2, 0, 3, 1));        \
+                a2 = __mm_shuffle_epi32_with_emulation(lo[1], hi[1], _MM_SHUFFLE(3, 1, 2, 0));        \
+                b2 = __mm_shuffle_epi32_with_emulation(lo[1], hi[1], _MM_SHUFFLE(2, 0, 3, 1));        \
+                a3 = __mm_shuffle_epi32_with_emulation(lo[2], hi[2], _MM_SHUFFLE(3, 1, 2, 0));        \
+                b3 = __mm_shuffle_epi32_with_emulation(lo[2], hi[2], _MM_SHUFFLE(2, 0, 3, 1));        \
+                a4 = __mm_shuffle_epi32_with_emulation(lo[3], hi[3], _MM_SHUFFLE(3, 1, 2, 0));        \
+                b4 = __mm_shuffle_epi32_with_emulation(lo[3], hi[3], _MM_SHUFFLE(2, 0, 3, 1));        \
 \
                 /* L3 processing */             \
-                lo[0] = _mm_min_ps(a1, b1);     \
-                hi[0] = _mm_max_ps(a1, b1);     \
-                lo[1] = _mm_min_ps(a2, b2);     \
-                hi[1] = _mm_max_ps(a2, b2);     \
-                lo[2] = _mm_min_ps(a3, b3);     \
-                hi[2] = _mm_max_ps(a3, b3);     \
-                lo[3] = _mm_min_ps(a4, b4);     \
-                hi[3] = _mm_max_ps(a4, b4);     \
+                lo[0] = _mm_min_epi32(a1, b1);     \
+                hi[0] = _mm_max_epi32(a1, b1);     \
+                lo[1] = _mm_min_epi32(a2, b2);     \
+                hi[1] = _mm_max_epi32(a2, b2);     \
+                lo[2] = _mm_min_epi32(a3, b3);     \
+                hi[2] = _mm_max_epi32(a3, b3);     \
+                lo[3] = _mm_min_epi32(a4, b4);     \
+                hi[3] = _mm_max_epi32(a4, b4);     \
 \
-                a1 = _mm_shuffle_ps(lo[0], hi[0], 0x88);        \
-                b1 = _mm_shuffle_ps(lo[0], hi[0], 0xdd);        \
-                a2 = _mm_shuffle_ps(lo[1], hi[1], 0x88);        \
-                b2 = _mm_shuffle_ps(lo[1], hi[1], 0xdd);        \
-                a3 = _mm_shuffle_ps(lo[2], hi[2], 0x88);        \
-                b3 = _mm_shuffle_ps(lo[2], hi[2], 0xdd);        \
-                a4 = _mm_shuffle_ps(lo[3], hi[3], 0x88);        \
-                b4 = _mm_shuffle_ps(lo[3], hi[3], 0xdd);        \
+                a1 = __mm_shuffle_epi32_with_emulation(lo[0], hi[0], _MM_SHUFFLE(2, 0, 2, 0));        \
+                b1 = __mm_shuffle_epi32_with_emulation(lo[0], hi[0], _MM_SHUFFLE(3, 1, 3, 1));        \
+                a2 = __mm_shuffle_epi32_with_emulation(lo[1], hi[1], _MM_SHUFFLE(2, 0, 2, 0));        \
+                b2 = __mm_shuffle_epi32_with_emulation(lo[1], hi[1], _MM_SHUFFLE(3, 1, 3, 1));        \
+                a3 = __mm_shuffle_epi32_with_emulation(lo[2], hi[2], _MM_SHUFFLE(2, 0, 2, 0));        \
+                b3 = __mm_shuffle_epi32_with_emulation(lo[2], hi[2], _MM_SHUFFLE(3, 1, 3, 1));        \
+                a4 = __mm_shuffle_epi32_with_emulation(lo[3], hi[3], _MM_SHUFFLE(2, 0, 2, 0));        \
+                b4 = __mm_shuffle_epi32_with_emulation(lo[3], hi[3], _MM_SHUFFLE(3, 1, 3, 1));        \
 \
-                a1 = _mm_shuffle_ps(a1, a1, 0xd8);      \
-                b1 = _mm_shuffle_ps(b1, b1, 0xd8);      \
-                a2 = _mm_shuffle_ps(a2, a2, 0xd8);      \
-                b2 = _mm_shuffle_ps(b2, b2, 0xd8);      \
-                a3 = _mm_shuffle_ps(a3, a3, 0xd8);      \
-                b3 = _mm_shuffle_ps(b3, b3, 0xd8);      \
-                a4 = _mm_shuffle_ps(a4, a4, 0xd8);      \
-                b4 = _mm_shuffle_ps(b4, b4, 0xd8);      \
+                a1 = _mm_shuffle_epi32(a1, _MM_SHUFFLE(3, 1, 2, 0));      \
+                b1 = _mm_shuffle_epi32(b1, _MM_SHUFFLE(3, 1, 2, 0));      \
+                a2 = _mm_shuffle_epi32(a2, _MM_SHUFFLE(3, 1, 2, 0));      \
+                b2 = _mm_shuffle_epi32(b2, _MM_SHUFFLE(3, 1, 2, 0));      \
+                a3 = _mm_shuffle_epi32(a3, _MM_SHUFFLE(3, 1, 2, 0));      \
+                b3 = _mm_shuffle_epi32(b3, _MM_SHUFFLE(3, 1, 2, 0));      \
+                a4 = _mm_shuffle_epi32(a4, _MM_SHUFFLE(3, 1, 2, 0));      \
+                b4 = _mm_shuffle_epi32(b4, _MM_SHUFFLE(3, 1, 2, 0));      \
         } while (0);
 
 #define __bitonic_merge_network8_sim2(a1, b1, a2, b2, a3, b3, a4, b4)   \
         do {                                    \
-                lo[0] = _mm_min_ps(a1, a2);     \
-                hi[0] = _mm_max_ps(a1, a2);     \
-                lo[1] = _mm_min_ps(b1, b2);     \
-                hi[1] = _mm_max_ps(b1, b2);     \
+                lo[0] = _mm_min_epi32(a1, a2);     \
+                hi[0] = _mm_max_epi32(a1, a2);     \
+                lo[1] = _mm_min_epi32(b1, b2);     \
+                hi[1] = _mm_max_epi32(b1, b2);     \
 \
-                lo[2] = _mm_min_ps(a3, a4);     \
-                hi[2] = _mm_max_ps(a3, a4);     \
-                lo[3] = _mm_min_ps(b3, b4);     \
-                hi[3] = _mm_max_ps(b3, b4);     \
+                lo[2] = _mm_min_epi32(a3, a4);     \
+                hi[2] = _mm_max_epi32(a3, a4);     \
+                lo[3] = _mm_min_epi32(b3, b4);     \
+                hi[3] = _mm_max_epi32(b3, b4);     \
 \
                 a1 = lo[0];     \
                 b1 = lo[1];     \
@@ -341,13 +355,14 @@ _cpuid_supported(void)
         } while (0);
 
 void
-_bitonic_sort32(float *d)
+_bitonic_sort32(int *d)
 {
-        float   *a;
-        __m128  reg1[8];
-        __m128  reg2[8];
-        __m128  lo[4];
-        __m128  hi[4];
+        int   *a;
+        __m128i  reg1[8];
+        __m128i  reg2[8];
+        __m128i  lo[4];
+        __m128i  hi[4];
+
 
         /* first in-regsiter sort 4x4 */
         a = d;
@@ -356,20 +371,19 @@ _bitonic_sort32(float *d)
         /* second In-regsiter sort 4x4 */
         a = d + 16;
         __inregister_sort(a, reg2);
-
         /* execute four 4x4 merging op. simultaneouly */
-        reg2[0] = _mm_shuffle_ps(reg2[0], reg2[0], 0x1b);
-        reg2[1] = _mm_shuffle_ps(reg2[1], reg2[1], 0x1b);
-        reg2[2] = _mm_shuffle_ps(reg2[2], reg2[2], 0x1b);
-        reg2[3] = _mm_shuffle_ps(reg2[3], reg2[3], 0x1b);
+        reg2[0] = _mm_shuffle_epi32(reg2[0], _MM_SHUFFLE(0, 1, 2, 3));
+        reg2[1] = _mm_shuffle_epi32(reg2[1], _MM_SHUFFLE(0, 1, 2, 3));
+        reg2[2] = _mm_shuffle_epi32(reg2[2], _MM_SHUFFLE(0, 1, 2, 3));
+        reg2[3] = _mm_shuffle_epi32(reg2[3], _MM_SHUFFLE(0, 1, 2, 3));
 
         __bitonic_merge_network4_sim4(reg1[0], reg2[0], reg1[1], reg2[1], reg1[2], reg2[2], reg1[3], reg2[3]);
 
         /* execute two 8x8 merging op. simultaneouly */
-        reg1[5] = _mm_shuffle_ps(reg1[1], reg1[1], 0x1b);
-        reg2[5] = _mm_shuffle_ps(reg2[1], reg2[1], 0x1b);
-        reg1[7] = _mm_shuffle_ps(reg1[3], reg1[3], 0x1b);
-        reg2[7] = _mm_shuffle_ps(reg2[3], reg2[3], 0x1b);
+        reg1[5] = _mm_shuffle_epi32(reg1[1], _MM_SHUFFLE(0, 1, 2, 3));
+        reg2[5] = _mm_shuffle_epi32(reg2[1], _MM_SHUFFLE(0, 1, 2, 3));
+        reg1[7] = _mm_shuffle_epi32(reg1[3], _MM_SHUFFLE(0, 1, 2, 3));
+        reg2[7] = _mm_shuffle_epi32(reg2[3], _MM_SHUFFLE(0, 1, 2, 3));
 
         reg1[1] = reg2[5];
         reg2[1] = reg1[5];
@@ -380,22 +394,22 @@ _bitonic_sort32(float *d)
         __bitonic_merge_network4_sim4(reg1[0], reg2[0], reg1[1], reg2[1], reg1[2], reg2[2], reg1[3], reg2[3]);
 
         /* execute a single 16x16 merging op. */
-        reg1[2] = _mm_shuffle_ps(reg1[2], reg1[2], 0x1b);
-        reg2[2] = _mm_shuffle_ps(reg2[2], reg2[2], 0x1b);
-        reg1[3] = _mm_shuffle_ps(reg1[3], reg1[3], 0x1b);
-        reg2[3] = _mm_shuffle_ps(reg2[3], reg2[3], 0x1b);
+        reg1[2] = _mm_shuffle_epi32(reg1[2], _MM_SHUFFLE(0, 1, 2, 3));
+        reg2[2] = _mm_shuffle_epi32(reg2[2], _MM_SHUFFLE(0, 1, 2, 3));
+        reg1[3] = _mm_shuffle_epi32(reg1[3], _MM_SHUFFLE(0, 1, 2, 3));
+        reg2[3] = _mm_shuffle_epi32(reg2[3], _MM_SHUFFLE(0, 1, 2, 3));
 
-        lo[0] = _mm_min_ps(reg1[0], reg2[3]);
-        hi[0] = _mm_max_ps(reg1[0], reg2[3]);
+        lo[0] = _mm_min_epi32(reg1[0], reg2[3]);
+        hi[0] = _mm_max_epi32(reg1[0], reg2[3]);
 
-        lo[1] = _mm_min_ps(reg2[0], reg1[3]);
-        hi[1] = _mm_max_ps(reg2[0], reg1[3]);
+        lo[1] = _mm_min_epi32(reg2[0], reg1[3]);
+        hi[1] = _mm_max_epi32(reg2[0], reg1[3]);
 
-        lo[2] = _mm_min_ps(reg1[1], reg2[2]);
-        hi[2] = _mm_max_ps(reg1[1], reg2[2]);
+        lo[2] = _mm_min_epi32(reg1[1], reg2[2]);
+        hi[2] = _mm_max_epi32(reg1[1], reg2[2]);
 
-        lo[3] = _mm_min_ps(reg2[1], reg1[2]);
-        hi[3] = _mm_max_ps(reg2[1], reg1[2]);
+        lo[3] = _mm_min_epi32(reg2[1], reg1[2]);
+        hi[3] = _mm_max_epi32(reg2[1], reg1[2]);
 
         reg1[0] = lo[0];
         reg2[0] = lo[1];
@@ -409,22 +423,25 @@ _bitonic_sort32(float *d)
         __bitonic_merge_network8_sim2(reg1[0], reg2[0], reg1[1], reg2[1], reg1[2], reg2[2], reg1[3], reg2[3]);
         __bitonic_merge_network4_sim4(reg1[0], reg2[0], reg1[1], reg2[1], reg1[2], reg2[2], reg1[3], reg2[3]);
 
-        _mm_store_ps(&d[0], reg1[0]);
-        _mm_store_ps(&d[4], reg2[0]);
-        _mm_store_ps(&d[8], reg1[1]);
-        _mm_store_ps(&d[12], reg2[1]);
-        _mm_store_ps(&d[16], reg1[2]);
-        _mm_store_ps(&d[20], reg2[2]);
-        _mm_store_ps(&d[24], reg1[3]);
-        _mm_store_ps(&d[28], reg2[3]);
+        _mm_store_si128((__m128i*)&d[0], reg1[0]);
+        _mm_store_si128((__m128i*)&d[4], reg2[0]);
+        _mm_store_si128((__m128i*)&d[8], reg1[1]);
+        _mm_store_si128((__m128i*)&d[12], reg2[1]);
+        _mm_store_si128((__m128i*)&d[16], reg1[2]);
+        _mm_store_si128((__m128i*)&d[20], reg2[2]);
+        _mm_store_si128((__m128i*)&d[24], reg1[3]);
+        _mm_store_si128((__m128i*)&d[28], reg2[3]);
 
 #ifdef DEBUG
-        int32_t i;
-
         for (i = 1; i < 32; i++) {
-                if (d[i - 1] > d[i])
+                if (d[i - 1] > d[i]) {
+			printf("error: d[%d] = %d should be larger than d[%d] = %d\n", i - 1, d[i - 1], i, d[i]);
                         eoutput("unsorted input error");
+		}
         }
+        for (i = 1; i < 32; i++) {
+        		//printf("r[%2d] = %15d %#x\n", i, d[i], d[i]);
+	}	
 #endif /* DEBUG */
 }
 
@@ -432,8 +449,8 @@ void *
 _bitonic_sort(void *arg)
 {
         int32_t         i;
-        float           *d;
-        float           *buf;
+        int           *d;
+        int           *buf;
         struct _chunk_info      *c;
 
         /* Initialization */
@@ -443,10 +460,16 @@ _bitonic_sort(void *arg)
 
         doutput(FILE_OUTPUT, "[%u]: offset>%u chk->%u", (uint32_t)pthread_self(), c->offset, c->chk);
 
+#ifdef DEBUG
+	printf("=== phanse 1 ===\n");
+#endif
 	/* Sort individual 32 strips */
         for (i = 0; i < c->chk / 32; i++)
                 _bitonic_sort32(&d[c->offset + 32 * i]);
 
+#ifdef DEBUG
+	printf("=== phanse 2 ===\n");
+#endif
 	/* Merge 32-long strips */
         _bitonic_merge(&d[c->offset], c->chk, &buf[c->offset], 32);
 
@@ -460,41 +483,43 @@ _bitonic_sort(void *arg)
         return NULL;
 }
 
-void _bitonic_merge(float *d, uint32_t s, float *buf, uint32_t chunk_size)
+void _bitonic_merge(int *d, uint32_t s, int *buf, uint32_t chunk_size)
 {
-	int     step;
-	int     step_size;
-	float   *src;
-	float   *dest;
+	uint32_t     step;
+	uint32_t     step_size;
+	int   *src;
+	int   *dest;
 
         for (step_size = chunk_size, src = d, dest = buf; step_size < s; step_size *= 2) {
-                for (step = 0; step < s; step += step_size * 2)
-			_bitonic_merge_kernel16n(dest + step, src + step, src + step + step_size, step_size);
+                for (step = 0; step < s; step += step_size * 2) {
+			_bitonic_merge_kernel16n((dest + step), (src + step), (src + (step + step_size)), step_size);
+		}
 
-                _replace_float_adr(src, dest);
+                _replace_int_adr(src, dest);
 	}
 
 	if(src != d)
-                _fast_memcpy(d, src, s * sizeof(float));
+                _fast_memcpy(d, src, s * sizeof(int));
+
+
 }
 
 #define LOAD16(arg)     \
-	mb[3] = _mm_load_ps(arg);               \
-	mb[2] = _mm_load_ps(arg + 4);           \
-	mb[1] = _mm_load_ps(arg + 8);           \
-	mb[0] = _mm_load_ps(arg + 12);          \
-        arg += 16
+	mb[3] = _mm_load_si128((__m128i*)arg); arg+=4;            \
+	mb[2] = _mm_load_si128((__m128i*)arg); arg+=4;           	\
+	mb[1] = _mm_load_si128((__m128i*)arg); arg+=4;           	\
+	mb[0] = _mm_load_si128((__m128i*)arg); arg+=4;          
 
 void 
-_bitonic_merge_kernel16n(float *dest, float *a, float *b /* must not be reversed*/, uint32_t s)
+_bitonic_merge_kernel16n(int *dest, int *a, int *b /* must not be reversed*/, uint32_t s)
 {
-	float 		*last_a;
-	float 		*last_b;
-	float 		*last_dest;
-        __m128          ma[4];
-        __m128          mb[4];
-        __m128          lo[4];
-        __m128          hi[4];
+	int 		*last_a;
+	int 		*last_b;
+	int 		*last_dest;
+        __m128i          ma[4];
+        __m128i          mb[4];
+        __m128i          lo[4];
+        __m128i          hi[4];
 
         /* Settings for termination */
 	last_a = a + s;
@@ -505,15 +530,28 @@ _bitonic_merge_kernel16n(float *dest, float *a, float *b /* must not be reversed
 	int32_t         i;
 
         for (i = 0; i < s - 1; i++) {
-                if (a[i] > a[i + 1] || b[i] > b[i + 1])
+                if (a[i] > a[i + 1] || b[i] > b[i + 1]) {
+			printf("error: a[%d] = %d should be smaller than a[%d] = %d\n", i, a[i], i + 1, a[i + 1]);
+			printf("error: b[%d] = %d should be smaller than b[%d] = %d\n", i, b[i], i + 1, b[i + 1]);
+			for (i = 0; i < s - 1; i++) {
+				printf("(a[%d], b[%d]) = (%d, %d)\n", i, i, a[i], b[i]);
+			}
                         eoutput("unsorted input error");
+		}
         }
 #endif /* DEBUG */
 
-	ma[0] = _mm_load_ps(a); a+=4;
-	ma[1] = _mm_load_ps(a); a+=4;
-	ma[2] = _mm_load_ps(a); a+=4;
-	ma[3] = _mm_load_ps(a); a+=4;
+	ma[0] = _mm_load_si128((__m128i*)a); a+=4;
+	ma[1] = _mm_load_si128((__m128i*)a); a+=4;
+	ma[2] = _mm_load_si128((__m128i*)a); a+=4;
+	ma[3] = _mm_load_si128((__m128i*)a); a+=4;
+
+#ifdef DEBUG
+	int* r1 = (int *) ma;
+        for (i = 0; i < 16; i++) {
+        	printf("before: ma[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+        }
+#endif /* DEBUG */
 
 	for(; dest < (last_dest - 16); dest += 16) {
                 /* Load either a or b */
@@ -549,204 +587,311 @@ _bitonic_merge_kernel16n(float *dest, float *a, float *b /* must not be reversed
 #endif /* SKEY_OPT */
                 }
 
-                mb[0] = _mm_shuffle_ps(mb[0], mb[0], 0x1b);
-                mb[1] = _mm_shuffle_ps(mb[1], mb[1], 0x1b);
-                mb[2] = _mm_shuffle_ps(mb[2], mb[2], 0x1b);
-                mb[3] = _mm_shuffle_ps(mb[3], mb[3], 0x1b);
+#ifdef DEBUG
+		r1 = (int *) ma;
+        	for (i = 0; i < 16; i++) {
+        		printf("after load16:  a[%2d] = %15d %#x\n", i, a[i], a[i]);
+        	}
+        	for (i = 0; i < 16; i++) {
+        		printf("after load16: ma[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+        	}
+		r1 = (int *) mb;
+        	for (i = 0; i < 16; i++) {
+        		printf("after load16:  b[%2d] = %15d %#x\n", i, b[i], b[i]);
+        	}
+        	for (i = 0; i < 16; i++) {
+        		printf("after load16: mb[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+        	}
 
-                lo[0] = _mm_min_ps(ma[0], mb[0]);
-                hi[0] = _mm_max_ps(ma[0], mb[0]);
+#endif /* DEBUG */
 
-                lo[1] = _mm_min_ps(ma[1], mb[1]);
-                hi[1] = _mm_max_ps(ma[1], mb[1]);
+                mb[0] = _mm_shuffle_epi32(mb[0], _MM_SHUFFLE(0, 1, 2, 3));
+                mb[1] = _mm_shuffle_epi32(mb[1], _MM_SHUFFLE(0, 1, 2, 3));
+                mb[2] = _mm_shuffle_epi32(mb[2], _MM_SHUFFLE(0, 1, 2, 3));
+                mb[3] = _mm_shuffle_epi32(mb[3], _MM_SHUFFLE(0, 1, 2, 3));
 
-                lo[2] = _mm_min_ps(ma[2], mb[2]);
-                hi[2] = _mm_max_ps(ma[2], mb[2]);
+#ifdef DEBUG
+                r1 = (int *) mb;
+                for (i = 0; i < 16; i++) {
+                        printf("after2: mb[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+                }
+#endif /* DEBUG */
 
-                lo[3] = _mm_min_ps(ma[3], mb[3]);
-                hi[3] = _mm_max_ps(ma[3], mb[3]);
+                lo[0] = _mm_min_epi32(ma[0], mb[0]);
+                hi[0] = _mm_max_epi32(ma[0], mb[0]);
 
-                _mm_store_ps(&dest[0], lo[0]);
-                _mm_store_ps(&dest[4], lo[1]);
-                _mm_store_ps(&dest[8], lo[2]);
-                _mm_store_ps(&dest[12], lo[3]);
-                _mm_store_ps(&dest[16], hi[2]);
-                _mm_store_ps(&dest[20], hi[3]);
-                _mm_store_ps(&dest[24], hi[0]);
-                _mm_store_ps(&dest[28], hi[1]);
+                lo[1] = _mm_min_epi32(ma[1], mb[1]);
+                hi[1] = _mm_max_epi32(ma[1], mb[1]);
+
+                lo[2] = _mm_min_epi32(ma[2], mb[2]);
+                hi[2] = _mm_max_epi32(ma[2], mb[2]);
+
+                lo[3] = _mm_min_epi32(ma[3], mb[3]);
+                hi[3] = _mm_max_epi32(ma[3], mb[3]);
+#ifdef DEBUG
+                r1 = (int *) lo;
+                for (i = 0; i < 16; i++) {
+                        printf("after3: lo[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+                }
+                r1 = (int *) hi;
+                for (i = 0; i < 16; i++) {
+                        printf("after3: hi[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+                }
+#endif /* DEBUG */
+
+
+                _mm_store_si128((__m128i*)&dest[0], lo[0]);
+                _mm_store_si128((__m128i*)&dest[4], lo[1]);
+                _mm_store_si128((__m128i*)&dest[8], lo[2]);
+                _mm_store_si128((__m128i*)&dest[12], lo[3]);
+                _mm_store_si128((__m128i*)&dest[16], hi[2]);
+                _mm_store_si128((__m128i*)&dest[20], hi[3]);
+                _mm_store_si128((__m128i*)&dest[24], hi[0]);
+                _mm_store_si128((__m128i*)&dest[28], hi[1]);
+
+#ifdef DEBUG
+                r1 = (int *) (dest + 16);
+                for (i = 0; i < 32; i++) {
+                        printf("after5: dest[%2d] = %15d %#x\n", i, dest[i], dest[i]);
+                }
+#endif /* DEBUG */
+
+
 
                 _bitonic_merge_kernel8core(&dest[0], &dest[8]);
                 _bitonic_merge_kernel8core(&dest[16], &dest[24]);
         
-		ma[0] = _mm_load_ps(&dest[16]);
-		ma[1] = _mm_load_ps(&dest[20]);
-		ma[2] = _mm_load_ps(&dest[24]);
-		ma[3] = _mm_load_ps(&dest[28]);
+		ma[0] = _mm_load_si128((__m128i*)&dest[16]);
+		ma[1] = _mm_load_si128((__m128i*)&dest[20]);
+		ma[2] = _mm_load_si128((__m128i*)&dest[24]);
+		ma[3] = _mm_load_si128((__m128i*)&dest[28]);
+#ifdef DEBUG
+/*
+		r1 = (int *) (dest + 16);
+		for (i = 0; i < 16; i++) {
+			if (r1[i] > r1[i + 1]) {
+                		for (i = 0; i < 16; i++) {
+                		        printf("ma[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+                		}
+				eoutput("unsorted input error");
+			}
+		}
+*/
+
+#endif /* DEBUG */
+
+
 	}
+
+#ifdef DEBUG
+		for (i = 0; i < s; i++) {
+			printf("%d \n", dest[i]);
+		}
+#endif /* DEBUG */
+
 }
 
 int32_t
-_compare_float(const void *a, const void *b)
+_compare_int(const void *a, const void *b)
 {
-        return (*(float *)a - *(float *)b);
+  int va = *(const int*) a;
+  int vb = *(const int*) b;
+  return (va > vb) - (va < vb);
 }
 
 void 
-_bitonic_sort_kernel4(float *a, float *b)
+_bitonic_sort_kernel4(int *a, int *b)
 {
-        __m128          ma[2];
-        __m128          mb[2];
-        __m128          lo;
-        __m128          hi;
+        __m128i          ma[2];
+        __m128i          mb[2];
+        __m128i          lo;
+        __m128i          hi;
 
-        ma[0] = _mm_loadu_ps(a);
-        mb[0] = _mm_loadu_ps(b);
+        ma[0] = _mm_loadu_si128((__m128i*)a);
+        mb[0] = _mm_loadu_si128((__m128i*)b);
 
         /* In-Register sort */
-        ma[1] = _mm_shuffle_ps(ma[0], mb[0], 0x88);
-        mb[1] = _mm_shuffle_ps(ma[0], mb[0], 0xdd);
+        ma[1] = __mm_shuffle_epi32_with_emulation(ma[0], mb[0], _MM_SHUFFLE(2, 0, 2, 0));
+        mb[1] = __mm_shuffle_epi32_with_emulation(ma[0], mb[0], _MM_SHUFFLE(3, 1, 3, 1));
 
-        lo = _mm_min_ps(ma[1], mb[1]);
-        hi = _mm_max_ps(ma[1], mb[1]);
+        lo = _mm_min_epi32(ma[1], mb[1]);
+        hi = _mm_max_epi32(ma[1], mb[1]);
 
-        ma[0] = _mm_shuffle_ps(hi, lo, 0xd8);
-        mb[0] = _mm_shuffle_ps(hi, lo, 0x8d);
+        ma[0] = __mm_shuffle_epi32_with_emulation(hi, lo, _MM_SHUFFLE(3, 1, 2, 0));
+        mb[0] = __mm_shuffle_epi32_with_emulation(hi, lo, _MM_SHUFFLE(2, 0, 3, 1));
 
-        lo = _mm_min_ps(ma[0], mb[0]);
-        hi = _mm_max_ps(ma[0], mb[0]);
+        lo = _mm_min_epi32(ma[0], mb[0]);
+        hi = _mm_max_epi32(ma[0], mb[0]);
 
-        ma[0] = _mm_shuffle_ps(lo, lo, 0xd8);
-        mb[0] = _mm_shuffle_ps(hi, hi, 0x72);
+        ma[0] = _mm_shuffle_epi32(lo, _MM_SHUFFLE(3, 1, 2, 0));
+        mb[0] = _mm_shuffle_epi32(hi, 0x72);
 
-        lo = _mm_min_ps(ma[0], mb[0]);
-        hi = _mm_max_ps(ma[0], mb[0]);
+        lo = _mm_min_epi32(ma[0], mb[0]);
+        hi = _mm_max_epi32(ma[0], mb[0]);
 
-        ma[0]  = _mm_shuffle_ps(lo, hi, 0x41);
-        mb[0] = _mm_shuffle_ps(hi, lo, 0xeb);
+        ma[0] = __mm_shuffle_epi32_with_emulation(lo, hi, 0x41);
+        mb[0] = __mm_shuffle_epi32_with_emulation(hi, lo, 0xeb);
 
-        _mm_storeu_ps(a, ma[0]);
-        _mm_storeu_ps(b, mb[0]);
+        _mm_storeu_si128((__m128i*)a, ma[0]);
+        _mm_storeu_si128((__m128i*)b, mb[0]);
 
         _bitonic_merge_kernel4core(a, b);
 }
 
 void 
-_bitonic_merge_kernel4(float *a, float *b)
+_bitonic_merge_kernel4(int *a, int *b)
 {
-        __m128          mb;
+        __m128i          mb;
+        /* Reverse *b */
+        mb = _mm_loadu_si128((__m128i*)b);
+        mb  = _mm_shuffle_epi32(mb, _MM_SHUFFLE(0, 1, 2, 3));
+        _mm_storeu_si128((__m128i*)b, mb);
+
+        _bitonic_merge_kernel4core(a, b);
+}
+
+void 
+_bitonic_merge_kernel4core(int *a, int *b)
+{
+        __m128i          ma;
+        __m128i          map;
+        __m128i          mb;
+        __m128i          mbp;
+        __m128i          lo;
+        __m128i          hi;
+
+        ma = _mm_loadu_si128((__m128i*)a);
+        mb = _mm_loadu_si128((__m128i*)b);
+
+        /* L1 processing */
+        lo = _mm_min_epi32(ma, mb);
+        hi = _mm_max_epi32(ma, mb);
+
+        map = __mm_shuffle_epi32_with_emulation(lo, hi, _MM_SHUFFLE(3, 2, 1, 0));
+        mbp = __mm_shuffle_epi32_with_emulation(lo, hi, _MM_SHUFFLE(1, 0, 3, 2));
+
+        /* L2 processing */
+        lo = _mm_min_epi32(map, mbp);
+        hi = _mm_max_epi32(map, mbp);
+
+        map = __mm_shuffle_epi32_with_emulation(lo, hi, _MM_SHUFFLE(3, 1, 2, 0));
+        mbp = __mm_shuffle_epi32_with_emulation(lo, hi, _MM_SHUFFLE(2, 0, 3, 1));
+
+        /* L3 processing */
+        lo = _mm_min_epi32(map, mbp);
+        hi = _mm_max_epi32(map, mbp);
+
+        map = __mm_shuffle_epi32_with_emulation(hi, lo, _MM_SHUFFLE(2, 0, 2, 0));
+        mbp = __mm_shuffle_epi32_with_emulation(hi, lo, _MM_SHUFFLE(3, 1, 3, 1));
+
+        map = _mm_shuffle_epi32(map, 0x72);
+        mbp = _mm_shuffle_epi32(mbp, 0x72);
+
 #ifdef DEBUG
-        int32_t         i;
+	int32_t         i;
+	int* r1 = (int *) (a);
+	for (i = 0; i < 4; i++) {
+		printf("kernel4-1: a[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+	}
+	r1 = (int *) (b);
+	for (i = 0; i < 4; i++) {
+		printf("kernel4-1: b[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+	}
 #endif /* DEBUG */
+
+        _mm_storeu_si128((__m128i*)a, map);
+        _mm_storeu_si128((__m128i*)b, mbp);
 
 #ifdef DEBUG
         for (i = 0; i < 3; i++) {
-                if (a[i] > a[i + 1] || b[i] > b[i + 1])
+                if (a[i] > a[i + 1] || b[i] > b[i + 1]) {
+                        printf("error: a[%d] = %d should be smaller than a[%d] = %d\n", i, a[i], i + 1, a[i + 1]);
+                        printf("error: b[%d] = %d should be smaller than b[%d] = %d\n", i, b[i], i + 1, b[i + 1]);
+                        for (i = 0; i < 4; i++) {
+                                printf("(a[%d], b[%d]) = (%d, %d)\n", i, i, a[i], b[i]);
+                        }
                         eoutput("unsorted input error");
+                }
         }
 #endif /* DEBUG */
+#ifdef DEBUG
+	r1 = (int *) (a);
+	for (i = 0; i < 4; i++) {
+		printf("kernel4-2: a[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+	}
+	r1 = (int *) (b);
+	for (i = 0; i < 4; i++) {
+		printf("kernel4-2: b[%2d] = %15d %#x\n", i, r1[i], r1[i]);
+	}
+#endif /* DEBUG */
 
-        /* Reverse *b */
-        mb = _mm_loadu_ps(b);
-        mb  = _mm_shuffle_ps(mb, mb, 0x1b);
-        _mm_storeu_ps(b, mb);
 
-        _bitonic_merge_kernel4core(a, b);
+
+
 }
 
 void 
-_bitonic_merge_kernel4core(float *a, float *b)
+_bitonic_merge_kernel8(int *a, int *b)
 {
-        __m128          ma;
-        __m128          map;
-        __m128          mb;
-        __m128          mbp;
-        __m128          lo;
-        __m128          hi;
-
-        ma = _mm_loadu_ps(a);
-        mb = _mm_loadu_ps(b);
-
-        /* L1 processing */
-        lo = _mm_min_ps(ma, mb);
-        hi = _mm_max_ps(ma, mb);
-
-        map = _mm_shuffle_ps(lo, hi, 0xe4);
-        mbp = _mm_shuffle_ps(lo, hi, 0x4e);
-
-        /* L2 processing */
-        lo = _mm_min_ps(map, mbp);
-        hi = _mm_max_ps(map, mbp);
-
-        map = _mm_shuffle_ps(lo, hi, 0xd8);
-        mbp = _mm_shuffle_ps(lo, hi, 0x8d);
-
-        /* L3 processing */
-        lo = _mm_min_ps(map, mbp);
-        hi = _mm_max_ps(map, mbp);
-
-        map = _mm_shuffle_ps(hi, lo, 0x88);
-        mbp = _mm_shuffle_ps(hi, lo, 0xdd);
-
-        map = _mm_shuffle_ps(map, map, 0x72);
-        mbp = _mm_shuffle_ps(mbp, mbp, 0x72);
-
-        _mm_storeu_ps(a, map);
-        _mm_storeu_ps(b, mbp);
-}
-
-void 
-_bitonic_merge_kernel8(float *a, float *b)
-{
-        __m128          mb[3];
+        __m128i          mb[3];
 #ifdef DEBUG
        int32_t          i;
 #endif /* DEBUG */
 
-#ifdef DEBUG
-        for (i = 0; i < 7; i++) {
-                if (a[i] > a[i + 1] || b[i] > b[i + 1])
-                        eoutput("unsorted input error");
-        }
-#endif /* DEBUG */
-
         /* Reverse *b */
-        mb[0] = _mm_loadu_ps(b);
-        mb[1] = _mm_loadu_ps(b + 4);
-        mb[2] = _mm_shuffle_ps(mb[1], mb[1], 0x1b);
-        mb[1] = _mm_shuffle_ps(mb[0], mb[0], 0x1b);
-        _mm_storeu_ps(b, mb[2]);
-        _mm_storeu_ps(b + 4, mb[1]);
+        mb[0] = _mm_loadu_si128((__m128i*)b);
+        mb[1] = _mm_loadu_si128((__m128i*)b + 4);
+        mb[2] = _mm_shuffle_epi32(mb[1], _MM_SHUFFLE(0, 1, 2, 3));
+        mb[1] = _mm_shuffle_epi32(mb[0], _MM_SHUFFLE(0, 1, 2, 3));
+        _mm_storeu_si128((__m128i*)b, mb[2]);
+        _mm_storeu_si128((__m128i*)b + 4, mb[1]);
 
         _bitonic_merge_kernel8core(a, b);
 }
 
 void 
-_bitonic_merge_kernel8core(float *a, float *b)
+_bitonic_merge_kernel8core(int *a, int *b)
 {
-        __m128          ma[2];
-        __m128          mb[2];
-        __m128          lo[2];
-        __m128          hi[2];
+        __m128i          ma[2];
+        __m128i          mb[2];
+        __m128i          lo[2];
+        __m128i          hi[2];
 
-        ma[0] = _mm_loadu_ps(a);
-        mb[0] = _mm_loadu_ps(b);
+        ma[0] = _mm_loadu_si128((__m128i*)a);
+        mb[0] = _mm_loadu_si128((__m128i*)b);
 
-        ma[1] = _mm_loadu_ps(a + 4);
-        mb[1] = _mm_loadu_ps(b + 4);
+        ma[1] = _mm_loadu_si128((__m128i*)(a + 4));
+        mb[1] = _mm_loadu_si128((__m128i*)(b + 4));
 
-        lo[0] = _mm_min_ps(ma[0], mb[0]);
-        hi[0] = _mm_max_ps(ma[0], mb[0]);
+        lo[0] = _mm_min_epi32(ma[0], mb[0]);
+        hi[0] = _mm_max_epi32(ma[0], mb[0]);
 
-        lo[1] = _mm_min_ps(ma[1], mb[1]);
-        hi[1] = _mm_max_ps(ma[1], mb[1]);
+        lo[1] = _mm_min_epi32(ma[1], mb[1]);
+        hi[1] = _mm_max_epi32(ma[1], mb[1]);
 
-        _mm_storeu_ps(&a[0], lo[0]);
-        _mm_storeu_ps(&a[4], lo[1]);
-        _mm_storeu_ps(&b[0], hi[1]);
-        _mm_storeu_ps(&b[4], hi[0]);
+        _mm_storeu_si128((__m128i*)&a[0], lo[0]);
+        _mm_storeu_si128((__m128i*)&a[4], lo[1]);
+        _mm_storeu_si128((__m128i*)&b[0], hi[1]);
+        _mm_storeu_si128((__m128i*)&b[4], hi[0]);
 
         _bitonic_merge_kernel4core(&a[0], &a[4]);
         _bitonic_merge_kernel4core(&b[0], &b[4]);
+
+#ifdef DEBUG
+        int         i;
+        for (i = 0; i < 7; i++) {
+                if (a[i] > a[i + 1] || b[i] > b[i + 1]) {
+                        printf("error: a[%d] = %d should be smaller than a[%d] = %d\n", i, a[i], i + 1, a[i + 1]);
+                        printf("error: b[%d] = %d should be smaller than b[%d] = %d\n", i, b[i], i + 1, b[i + 1]);
+                        for (i = 0; i < 4; i++) {
+                                printf("(a[%d], b[%d]) = (%d, %d)\n", i, i, a[i], b[i]);
+                        }
+                        eoutput("unsorted input error");
+                }
+        }
+#endif /* DEBUG */
+
+
 }
 
 void 

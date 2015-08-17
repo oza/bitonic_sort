@@ -72,7 +72,7 @@ CC = @CC@
 CCDEPMODE = @CCDEPMODE@
 
 # specify flags
-CFLAGS = -Wall -O3 -funroll-loops -msse2 -mtune=nocona
+CFLAGS = -Wall -O3 -funroll-loops -msse2 -msse4.1 -mtune=nocona
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
