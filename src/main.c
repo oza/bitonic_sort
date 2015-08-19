@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <sys/time.h>
+#include <limits.h>
 
 #include "bitonic_sort.h"
 #include "err_utils.h"
@@ -118,7 +119,7 @@ main(int argc, char **argv)
 
                 _replace_uint32(&d[r1], &d[r2]);
         }
-	memset(d_aligned + real_cnt, INT_MAX, cnt - real_cnt);
+	memset(d_aligned + real_cnt, LONG_MAX, cnt - real_cnt);
 
 
         /* Execute bitonic sort */
@@ -130,7 +131,7 @@ main(int argc, char **argv)
         err = err_check(d_aligned, cnt);
 
         if (err < 0)
-                eoutput("The returned keys are not completely sorted"); 
+                eoutput("The returned keys are not completely sorted");
         else
                 fprintf(stdout, "Sorting Speed: %.10lfmis\n", (double)(cnt / 1000000) / t);
 
