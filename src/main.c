@@ -17,9 +17,16 @@
 #include "bitonic_sort.h"
 #include "err_utils.h"
 
+#define __bsr(_arg1)             \
+        ({                              \
+                uint32_t        d;      \
+                __asm__("bsr %1, %0;" :"=r"(d) :"r"(_arg1));    \
+                d;                      \
+        })
+
 #define LAMBDA                  8.0
 #define SHUFFLE_RATE            0.8
-#define TEST_DATA_SIZE          20
+#define TEST_DATA_SIZE          1048576 // 2^20
 //#define DEFAULT_CHUNK_NUM       8
 #define DEFAULT_CHUNK_NUM       1
 
@@ -37,7 +44,7 @@ main(int argc, char **argv)
         int32_t         i;
         int32_t         res;
         int32_t         err;
-        uint32_t        mul;
+        uint64_t        real_cnt;
         uint32_t        scnt;
         uint32_t        cnt;
         uint32_t        r1;
@@ -48,10 +55,11 @@ main(int argc, char **argv)
         int           *buf_aligned;
         double          srat;
         double          t;
+	int		bsr;
 
         fprintf(stdout, "Usage: %s [the count of 32-bit ints (2^x)] [shuffling ratio]\n", argv[0]);
 
-        mul = TEST_DATA_SIZE;
+        real_cnt = TEST_DATA_SIZE;
         srat = SHUFFLE_RATE;
 
         while ((res = getopt(argc, argv, "fb")) != -1) {
@@ -72,19 +80,20 @@ main(int argc, char **argv)
                 }
         }
 
-        if (argc - optind >= 1) 
-                mul = atoi(argv[optind]);
+        if (argc - optind >= 1)
+                real_cnt = atoi(argv[optind]);
 
         if (argc - optind >= 2)
                 srat = atof(argv[optind + 1]);
 
-        if (mul < 16 || mul > 30 || srat < 0.1 || srat > 1.0) {
+        if (srat < 0.1 || srat > 1.0) {
                 fprintf(stdout, "Error: out of required range for these parameters (16<=x<=30 / 0.1<=ratio<=1.0)");
                 return EXIT_FAILURE;
         }
 
-        cnt = 1 << mul;
-        scnt = cnt * srat;
+	bsr = __bsr(real_cnt);
+        cnt = 1 << (bsr + 1);
+	scnt = cnt * srat;
 
         fprintf(stdout, "Count:%u Shuffle:%u\n", cnt, scnt);
 
@@ -109,6 +118,8 @@ main(int argc, char **argv)
 
                 _replace_uint32(&d[r1], &d[r2]);
         }
+	memset(d_aligned + real_cnt, INT_MAX, cnt - real_cnt);
+
 
         /* Execute bitonic sort */
         t = _gettimeofday_sec();

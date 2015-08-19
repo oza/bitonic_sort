@@ -1,4 +1,5 @@
 bsort
 *.log
 *.o
+*.swp
 .deps
