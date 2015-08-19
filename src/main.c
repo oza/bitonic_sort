@@ -14,13 +14,14 @@
 #include <time.h>
 #include <sys/time.h>
 #include <limits.h>
+#include <string.h>
 
 #include "bitonic_sort.h"
 #include "err_utils.h"
 
 #define __bsr(_arg1)             \
         ({                              \
-                uint32_t        d;      \
+                uint64_t        d;      \
                 __asm__("bsr %1, %0;" :"=r"(d) :"r"(_arg1));    \
                 d;                      \
         })
@@ -128,12 +129,12 @@ main(int argc, char **argv)
         t = _gettimeofday_sec() - t;
 
         /* Error chcking */
-        err = err_check(d_aligned, cnt);
+        err = err_check(d_aligned, real_cnt);
 
         if (err < 0)
                 eoutput("The returned keys are not completely sorted");
         else
-                fprintf(stdout, "Sorting Speed: %.10lfmis\n", (double)(cnt / 1000000) / t);
+                fprintf(stdout, "Sorting Speed: %.10lfmis\n", (double)(real_cnt / 1000000) / t);
 
         free(d);
         free(buf);
